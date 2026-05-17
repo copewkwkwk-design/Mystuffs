@@ -1,10 +1,20 @@
 import asyncio
 import os
+import sys
+
+# --- PYTHON 3.13 COMPATIBILITY PATCH ---
+# Python 3.13 removed 'audioop', which breaks older discord.py versions.
+# This fake module injection tricks discord.py into skipping it safely.
+if sys.version_info >= (3, 13):
+    import types
+    fake_audioop = types.ModuleType("audioop")
+    sys.modules["audioop"] = fake_audioop
+# ----------------------------------------
+
 import discord
 from discord.ext import commands
 
 # --- CONFIGURATION SETTINGS ---
-# We use os.environ.get to safely pull the token from Railway's settings
 TOKEN = os.environ.get("DISCORD_TOKEN")
 PARTNERSHIP_ROLE_NAME = "rep"  
 AD_CHANNEL_ID = 1409925659979022448  
@@ -138,3 +148,4 @@ if TOKEN:
     bot.run(TOKEN)
 else:
     print("CRITICAL ERROR: DISCORD_TOKEN environment variable is missing!")
+
