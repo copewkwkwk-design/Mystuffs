@@ -1,151 +1,123 @@
 import asyncio
-import os
-import sys
-
-# --- PYTHON 3.13 COMPATIBILITY PATCH ---
-# Python 3.13 removed 'audioop', which breaks older discord.py versions.
-# This fake module injection tricks discord.py into skipping it safely.
-if sys.version_info >= (3, 13):
-    import types
-    fake_audioop = types.ModuleType("audioop")
-    sys.modules["audioop"] = fake_audioop
-# ----------------------------------------
-
 import discord
 from discord.ext import commands
+import re
+import os
 
-# --- CONFIGURATION SETTINGS ---
-TOKEN = os.environ.get("DISCORD_TOKEN")
-PARTNERSHIP_ROLE_NAME = "rep"  
-AD_CHANNEL_ID = 1409925659979022448  
-TICKET_BOT_ID = 557628352828014614  
-# ------------------------------
+# ==========================================
+# CONFIGURATION & CREDENTIALS
+# ==========================================
+# Securely fetch the token from Railway's environment variables
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 
+STAFF_ROLE_ID = 1409944574541037678          
+REP_ROLE_ID = 1421777773286129734            
+PARTNERSHIP_CHANNEL_ID = 1409925659979022448   
+
+# ==========================================
+# INTERACTIVE UI VIEWS
+# ==========================================
+class TicketMenu(discord.ui.View):
+    def __init__(self, target_user: discord.Member):
+        super().__init__(timeout=None)
+        self.target_user = target_user
+        self.choice = None
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user != self.target_user:
+            await interaction.response.send_message("This menu is only for the ticket creator!", ephemeral=True)
+            return False
+        return True
+
+    def disable_buttons(self):
+        for child in self.children:
+            child.disabled = True
+
+    @discord.ui.button(label="Partnership", style=discord.ButtonStyle.blurple)
+    async def partnership_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.choice = "ps"
+        await interaction.response.send_message("You selected Partnership!", ephemeral=True)
+        self.stop()
+
+    @discord.ui.button(label="Claim Perks", style=discord.ButtonStyle.success)
+    async def perks_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.choice = "perks"
+        await interaction.response.send_message("You selected Claim Perks!", ephemeral=True)
+        self.stop()
+
+    @discord.ui.button(label="General Concerns", style=discord.ButtonStyle.secondary)
+    async def concerns_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.choice = "concerns"
+        await interaction.response.send_message("You selected Concerns!", ephemeral=True)
+        self.stop()
+
+
+class StaffClaimView(discord.ui.View):
+    def __init__(self, choice: str):
+        super().__init__(timeout=None)
+        self.choice = choice
+        self.claimed_by = None
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        staff_role = interaction.guild.get_role(STAFF_ROLE_ID)
+        if not staff_role or staff_role not in interaction.user.roles:
+            await interaction.response.send_message("Only authorized staff can claim this!", ephemeral=True)
+            return False
+        return True
+
+    def disable_buttons(self):
+        for child in self.children:
+            child.disabled = True
+
+    @discord.ui.button(label="Claim Ticket", style=discord.ButtonStyle.danger)
+    async def claim_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.claimed_by = interaction.user
+        
+        if self.choice == "ps":
+            await interaction.response.send_message(f"{interaction.user.mention} will be our rep")
+        else:
+            await interaction.response.send_message(f"{interaction.user.mention} will be assisting you po")
+        self.stop()
+
+
+# ==========================================
+# BOT INITIALIZATION
+# ==========================================
 intents = discord.Intents.default()
-intents.messages = True
-intents.message_content = True
-intents.guilds = True
-intents.members = True
-
+intents.message_content = True  
+intents.guilds = True  
 bot = commands.Bot(command_prefix="!", intents=intents)
-
 
 @bot.event
 async def on_ready():
-    print(f"Logged in successfully as {bot.user.name}")
+    print("------------------------------------------")
+    print(f"Logged in as: {bot.user.name}")
+    print("Bot is ACTIVE and ready to catch any ticket messages!")
+    print("------------------------------------------")
 
+# ==========================================
+# WORKFLOW UTILITIES
+# ==========================================
+async def close_ticket_channel(channel: discord.TextChannel, final_message: str):
+    await channel.send(final_message)
+    await asyncio.sleep(5)
+    await channel.delete()
 
-@bot.event
-async def on_message(message):
-    if message.author == bot.user:
-        return
+async def handle_partnership_workflow(channel: discord.TextChannel, user_target: discord.Member):
+    await channel.send(f"{user_target.mention}, please drop your server's ad text below:\n*(Note: Your ad MUST contain a valid Discord Server link!)*")
 
-    # Detect when Ticket Tool speaks inside a ticket channel
-    if message.author.id == TICKET_BOT_ID and "ticket" in message.channel.name.lower():
-        ctx_channel = message.channel
-        
-        # FIND THE HUMAN OWNER OF THE TICKET VIA MENTIONS
-        target_user = None
-        if message.mentions:
-            for user in message.mentions:
-                if not user.bot:
-                    target_user = user
-                    break
+    def check_ad(m):
+        return m.author == user_target and m.channel == channel
 
-        # Fallback to scanning channel members if mention detection fails
-        if not target_user:
-            for member in ctx_channel.members:
-                if member.bot:
-                    continue
-                perms = ctx_channel.permissions_for(member)
-                if perms.view_channel:
-                    target_user = member
-                    break
+    ad_message = None
+    invite_regex = r"(?:https?://)?(?:www\.)?(?:discord\.gg/|discord(?:app)?\.com/invite/)[a-zA-Z0-9-]+"
 
-        if not target_user:
-            return
-
-        # GREET THE USER
-        await ctx_channel.send(
-            f"Hi, {target_user.mention} I'll be assisting your ticket. Please lend us your **Advertisement** here.\n"
-            "-# reply to this message with your advertisement  on to continue. If not, the bot will ignore your message."
-        )
-
-        def check_ad(m):
-            return m.author == target_user and m.channel == ctx_channel
-
-        # LOOP TO VALIDATE THE ADVERTISEMENT
-        user_ad_msg = None
-        while True:
-            try:
-                user_ad_msg = await bot.wait_for("message", check=check_ad, timeout=600)
-            except asyncio.TimeoutError:
-                return
-
-            msg_content = user_ad_msg.content.lower()
-
-            # Check if the message contains a link
-            if "http://" in msg_content or "https://" in msg_content or "discord.gg" in msg_content:
+    while True:
+        try:
+            msg = await bot.wait_for('message', check=check_ad, timeout=300)
+            
+            if re.search(invite_regex, msg.content):
+                ad_message = msg
                 break
             else:
-                await user_ad_msg.reply("this is not an **Ad**")
-
-        # POSTING THE ADVERTISEMENT
-        ad_channel = bot.get_channel(AD_CHANNEL_ID)
-        if ad_channel:
-            await user_ad_msg.reply(f"Posting your **Ad** on {ad_channel.mention}")
-            await ad_channel.send(user_ad_msg.content)
-            await ad_channel.send(f"Partnership with {target_user.mention}!")
-        else:
-            print("Error: Ad channel not found.")
-
-        # GIVE THE "rep" ROLE
-        member_in_guild = message.guild.get_member(target_user.id)
-        if member_in_guild:
-            role = discord.utils.get(message.guild.roles, name=PARTNERSHIP_ROLE_NAME)
-            if role:
-                try:
-                    await member_in_guild.add_roles(role)
-                except discord.Forbidden:
-                    print("Error: Bot role needs to be higher in the server settings.")
-            else:
-                print(f"Error: Role '{PARTNERSHIP_ROLE_NAME}' not found.")
-
-        # CLOSING LOOP (opo / wala pa po)
-        while True:
-            await ctx_channel.send(
-                "posted na po ba?\n-# only reply with a \"opo / wala pa po\" "
-            )
-
-            def check_confirmation(m):
-                return (
-                    m.author == target_user
-                    and m.channel == ctx_channel
-                    and m.content.lower().strip() in ["opo", "wala pa po"]
-                )
-
-            try:
-                conf_msg = await bot.wait_for("message", check=check_confirmation, timeout=600)
-                user_response = conf_msg.content.lower().strip()
-
-                if user_response == "opo":
-                    await ctx_channel.send(
-                        "Thank you so much for partnering with us! Closing ticket..."
-                    )
-                    await asyncio.sleep(3)
-                    await ctx_channel.delete()
-                    break
-
-                elif user_response == "wala pa po":
-                    await ctx_channel.send("ahh, take your time po")
-
-            except asyncio.TimeoutError:
-                break
-
-    await bot.process_commands(message)
-
-if TOKEN:
-    bot.run(TOKEN)
-else:
-    print("CRITICAL ERROR: DISCORD_TOKEN environment variable is missing!")
-
+                await channel.send(f"⚠️ **Invalid ad!** {user_target.mention}, your message must contain a valid Discord invite link. External links or text-only
